@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "secured-mcp": {
+      "command": "node",
+      "args": ["/REPLACE/WITH/ABSOLUTE/PATH/TO/SecuredMcpServer/build/index.js"],
+      "env": {},
+      "metadata": {
+        "apiKey": "mcp-secret-key-12345"
+      }
+    }
+  }
+}
