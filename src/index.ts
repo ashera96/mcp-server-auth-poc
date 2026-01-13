@@ -12,31 +12,71 @@ import express from "express";
 import cors from "cors";
 import https from "https";
 import fs from "fs";
+import jwt from "jsonwebtoken";
 
-// Hard-coded API key for POC
+// Hard-coded credentials for POC
 const VALID_API_KEY = "mcp-secret-key-12345";
+const JWT_SECRET = "mcp-jwt-secret-key-do-not-use-in-production";
+const OAUTH_CLIENT_ID = "mcp-client";
+const OAUTH_CLIENT_SECRET = "mcp-client-secret";
+
 const PORT = process.env.PORT || 3000;
 const USE_HTTPS = process.env.USE_HTTPS === "true" || false;
 
+// In-memory token store (for POC only)
+const validTokens = new Set<string>();
+
 /**
- * Authentication middleware to validate API key
- * Checks for API key in the request metadata
+ * Authentication type
  */
-function validateApiKey(apiKey: string | undefined): void {
-  if (!apiKey || apiKey !== VALID_API_KEY) {
-    throw new McpError(
-      ErrorCode.InvalidRequest,
-      "Invalid or missing API key. Please provide a valid API key in the request metadata."
-    );
+type AuthType = "apikey" | "oauth2";
+
+/**
+ * Validate authentication credentials
+ */
+function validateAuth(apiKey: string | undefined, bearerToken: string | undefined): AuthType {
+  // Try API key first
+  if (apiKey && apiKey === VALID_API_KEY) {
+    return "apikey";
   }
+
+  // Try OAuth2 bearer token
+  if (bearerToken) {
+    try {
+      const decoded = jwt.verify(bearerToken, JWT_SECRET) as jwt.JwtPayload;
+
+      // Check if token is in valid tokens set
+      if (validTokens.has(bearerToken)) {
+        return "oauth2";
+      }
+
+      throw new Error("Token not in valid set");
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        "Invalid or expired OAuth2 token"
+      );
+    }
+  }
+
+  throw new McpError(
+    ErrorCode.InvalidRequest,
+    "Authentication required. Provide either 'x-api-key' header or 'Authorization: Bearer' token."
+  );
 }
 
 /**
- * Extract API key from request metadata
+ * Extract credentials from request metadata
  */
-function getApiKeyFromMeta(meta?: Record<string, unknown>): string | undefined {
-  if (!meta) return undefined;
-  return meta.apiKey as string | undefined;
+function getCredentialsFromMeta(meta?: Record<string, unknown>): {
+  apiKey?: string;
+  bearerToken?: string;
+} {
+  if (!meta) return {};
+  return {
+    apiKey: meta.apiKey as string | undefined,
+    bearerToken: meta.bearerToken as string | undefined,
+  };
 }
 
 /**
@@ -57,12 +97,14 @@ function createServer() {
 
   /**
    * Handler for listing available tools
-   * Requires authentication via API key
+   * Requires authentication via API key or OAuth2
    */
   server.setRequestHandler(ListToolsRequestSchema, async (request) => {
-    // Extract and validate API key from request metadata
-    const apiKey = getApiKeyFromMeta(request.params?._meta);
-    validateApiKey(apiKey);
+    // Extract and validate credentials from request metadata
+    const { apiKey, bearerToken } = getCredentialsFromMeta(request.params?._meta);
+    const authType = validateAuth(apiKey, bearerToken);
+
+    console.log(`✓ Authenticated tools/list request via ${authType}`);
 
     // If authentication succeeds, return the list of available tools
     return {
@@ -123,12 +165,14 @@ function createServer() {
 
   /**
    * Handler for tool execution
-   * Requires authentication via API key
+   * Requires authentication via API key or OAuth2
    */
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    // Extract and validate API key from request metadata
-    const apiKey = getApiKeyFromMeta(request.params._meta);
-    validateApiKey(apiKey);
+    // Extract and validate credentials from request metadata
+    const { apiKey, bearerToken } = getCredentialsFromMeta(request.params._meta);
+    const authType = validateAuth(apiKey, bearerToken);
+
+    console.log(`✓ Authenticated tools/call request via ${authType}`);
 
     // Process the tool call based on the tool name
     switch (request.params.name) {
@@ -209,15 +253,23 @@ function createServer() {
 }
 
 /**
- * Middleware to inject API key from HTTP headers into MCP request metadata
+ * Middleware to inject credentials from HTTP headers into MCP request metadata
  */
-function injectApiKeyMiddleware(
+function injectAuthMiddleware(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
 ) {
   // Get API key from header
   const apiKey = req.headers["x-api-key"] as string | undefined;
+
+  // Get Bearer token from Authorization header
+  const authHeader = req.headers["authorization"] as string | undefined;
+  let bearerToken: string | undefined;
+
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    bearerToken = authHeader.substring(7);
+  }
 
   // Inject into request body metadata if body exists
   if (req.body && typeof req.body === "object") {
@@ -227,7 +279,12 @@ function injectApiKeyMiddleware(
     if (!req.body.params._meta) {
       req.body.params._meta = {};
     }
-    req.body.params._meta.apiKey = apiKey;
+    if (apiKey) {
+      req.body.params._meta.apiKey = apiKey;
+    }
+    if (bearerToken) {
+      req.body.params._meta.bearerToken = bearerToken;
+    }
   }
 
   next();
@@ -250,6 +307,69 @@ async function main() {
     res.json({ status: "ok", server: "secured-mcp-server", version: "1.0.0" });
   });
 
+  // OAuth2 Token Endpoint (mock)
+  app.post("/oauth/token", (req, res) => {
+    const { grant_type, client_id, client_secret } = req.body;
+
+    // Validate grant type
+    if (grant_type !== "client_credentials") {
+      res.status(400).json({
+        error: "unsupported_grant_type",
+        error_description: "Only client_credentials grant type is supported",
+      });
+      return;
+    }
+
+    // Validate client credentials
+    if (client_id !== OAUTH_CLIENT_ID || client_secret !== OAUTH_CLIENT_SECRET) {
+      res.status(401).json({
+        error: "invalid_client",
+        error_description: "Invalid client credentials",
+      });
+      return;
+    }
+
+    // Generate JWT access token
+    const accessToken = jwt.sign(
+      {
+        client_id: client_id,
+        scope: "mcp:tools",
+        iat: Math.floor(Date.now() / 1000),
+      },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    // Store token in valid tokens set
+    validTokens.add(accessToken);
+
+    // Return token response
+    res.json({
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "mcp:tools",
+    });
+  });
+
+  // OAuth2 Token Revocation Endpoint (mock)
+  app.post("/oauth/revoke", (req, res) => {
+    const { token } = req.body;
+
+    if (!token) {
+      res.status(400).json({
+        error: "invalid_request",
+        error_description: "Token parameter is required",
+      });
+      return;
+    }
+
+    // Remove token from valid tokens set
+    validTokens.delete(token);
+
+    res.status(200).json({ revoked: true });
+  });
+
   // Create MCP server and transport in stateless mode
   const server = createServer();
   const transport = new StreamableHTTPServerTransport({
@@ -259,8 +379,8 @@ async function main() {
   await server.connect(transport);
 
   // MCP endpoint - handles both GET (SSE) and POST (messages)
-  // Apply API key injection middleware before handling requests
-  app.all("/mcp", injectApiKeyMiddleware, async (req, res) => {
+  // Apply auth injection middleware before handling requests
+  app.all("/mcp", injectAuthMiddleware, async (req, res) => {
     await transport.handleRequest(req, res, req.body);
   });
 
@@ -273,8 +393,7 @@ async function main() {
     if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
       console.error("\n❌ HTTPS enabled but certificates not found!");
       console.error("Please generate certificates first:");
-      console.error("  mkdir -p certs");
-      console.error("  openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt -days 365 -nodes -subj '/CN=localhost'");
+      console.error("  ./generate-certs.sh");
       process.exit(1);
     }
 
@@ -286,29 +405,30 @@ async function main() {
     https.createServer(httpsOptions, app).listen(PORT, () => {
       console.log(`\n✅ Secured MCP Server running on https://localhost:${PORT}`);
       console.log(`MCP endpoint: https://localhost:${PORT}/mcp`);
+      console.log(`OAuth2 token endpoint: https://localhost:${PORT}/oauth/token`);
       console.log(`Health check: https://localhost:${PORT}/health`);
-      console.log(`\nValid API Key for testing: ${VALID_API_KEY}`);
-      console.log(`\nSend requests with header: x-api-key: ${VALID_API_KEY}`);
-      console.log(`\nExample curl command (use -k to ignore self-signed cert):`);
-      console.log(`curl -k -X POST https://localhost:${PORT}/mcp \\`);
-      console.log(`  -H "Content-Type: application/json" \\`);
-      console.log(`  -H "Accept: application/json, text/event-stream" \\`);
-      console.log(`  -H "x-api-key: ${VALID_API_KEY}" \\`);
-      console.log(`  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'`);
+      console.log(`\n🔑 Authentication Methods:`);
+      console.log(`  1. API Key: ${VALID_API_KEY}`);
+      console.log(`  2. OAuth2 Client Credentials:`);
+      console.log(`     Client ID: ${OAUTH_CLIENT_ID}`);
+      console.log(`     Client Secret: ${OAUTH_CLIENT_SECRET}`);
     });
   } else {
     app.listen(PORT, () => {
       console.log(`\n✅ Secured MCP Server running on http://localhost:${PORT}`);
       console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+      console.log(`OAuth2 token endpoint: http://localhost:${PORT}/oauth/token`);
       console.log(`Health check: http://localhost:${PORT}/health`);
-      console.log(`\nValid API Key for testing: ${VALID_API_KEY}`);
-      console.log(`\nSend requests with header: x-api-key: ${VALID_API_KEY}`);
-      console.log(`\nExample curl command to test:`);
-      console.log(`curl -X POST http://localhost:${PORT}/mcp \\`);
+      console.log(`\n🔑 Authentication Methods:`);
+      console.log(`  1. API Key: ${VALID_API_KEY}`);
+      console.log(`     Header: x-api-key: ${VALID_API_KEY}`);
+      console.log(`  2. OAuth2 Client Credentials:`);
+      console.log(`     Client ID: ${OAUTH_CLIENT_ID}`);
+      console.log(`     Client Secret: ${OAUTH_CLIENT_SECRET}`);
+      console.log(`\n📝 Get OAuth2 Token:`);
+      console.log(`curl -X POST http://localhost:${PORT}/oauth/token \\`);
       console.log(`  -H "Content-Type: application/json" \\`);
-      console.log(`  -H "Accept: application/json, text/event-stream" \\`);
-      console.log(`  -H "x-api-key: ${VALID_API_KEY}" \\`);
-      console.log(`  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'`);
+      console.log(`  -d '{"grant_type":"client_credentials","client_id":"${OAUTH_CLIENT_ID}","client_secret":"${OAUTH_CLIENT_SECRET}"}'`);
     });
   }
 }

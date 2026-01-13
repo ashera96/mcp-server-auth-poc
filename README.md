@@ -1,29 +1,63 @@
 # Secured MCP Server
 
-An MCP (Model Context Protocol) server implementation with API key-based authentication over HTTP/HTTPS. This server requires authentication for all operations, including listing available tools.
+An MCP (Model Context Protocol) server implementation with **dual authentication** support: API Key and OAuth 2.0 Client Credentials. This server requires authentication for all operations, including listing available tools.
 
 ## Features
 
-- ✅ **API key authentication** via HTTP headers (`x-api-key`)
+- ✅ **Dual Authentication**: API Key AND OAuth 2.0 Client Credentials
 - ✅ **HTTP and HTTPS support** with self-signed certificates for development
 - ✅ **Stateless mode** - no session initialization required, supports multiple concurrent clients
+- ✅ **OAuth2 token endpoint** - Full client credentials flow with JWT tokens
 - ✅ **Three sample tools**: `get_server_time`, `echo`, and `calculate`
-- ✅ **Hard-coded API key** for POC purposes: `mcp-secret-key-12345`
+- ✅ **Mock credentials** for POC testing
 - Built with TypeScript and the MCP SDK
 
-## Authentication
+## Authentication Methods
 
-All MCP requests to this server must include a valid API key in the HTTP request header:
+This server supports **TWO authentication methods** - use either one:
 
-```
+### Method 1: API Key (Simple)
+
+Include the API key in HTTP headers:
+
+```bash
 x-api-key: mcp-secret-key-12345
 ```
 
-The authentication is enforced at two levels:
-1. **HTTP middleware** validates the header
-2. **MCP request handlers** validate the API key in request metadata
+### Method 2: OAuth 2.0 (Standard)
 
-Requests without a valid API key will be rejected with an authentication error.
+1. Get an access token:
+```bash
+curl -X POST https://localhost:3000/oauth/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "client_credentials",
+    "client_id": "mcp-client",
+    "client_secret": "mcp-client-secret"
+  }'
+```
+
+2. Use the Bearer token:
+```bash
+Authorization: Bearer YOUR_ACCESS_TOKEN
+```
+
+**See [OAUTH2.md](OAUTH2.md) for complete OAuth2 documentation.**
+
+## Test Credentials
+
+| Method | Credential | Value |
+|--------|-----------|-------|
+| API Key | Header | `x-api-key: mcp-secret-key-12345` |
+| OAuth2 | Client ID | `mcp-client` |
+| OAuth2 | Client Secret | `mcp-client-secret` |
+| OAuth2 | Token Lifetime | 1 hour |
+
+The authentication is enforced at two levels:
+1. **HTTP middleware** extracts credentials from headers
+2. **MCP request handlers** validate credentials before processing
+
+Requests without valid authentication will be rejected.
 
 ## Stateless Mode
 
