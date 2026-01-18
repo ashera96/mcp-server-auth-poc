@@ -302,6 +302,9 @@ async function main() {
   // Parse JSON bodies
   app.use(express.json());
 
+  // Parse URL-encoded bodies (for standard OAuth2 token requests)
+  app.use(express.urlencoded({ extended: true }));
+
   // Health check endpoint (no authentication required)
   app.get("/health", (req, res) => {
     res.json({ status: "ok", server: "secured-mcp-server", version: "1.0.0" });
@@ -309,7 +312,25 @@ async function main() {
 
   // OAuth2 Token Endpoint (mock)
   app.post("/oauth/token", (req, res) => {
-    const { grant_type, client_id, client_secret } = req.body;
+    const { grant_type } = req.body;
+    let client_id: string | undefined;
+    let client_secret: string | undefined;
+
+    // Extract client credentials from either HTTP Basic Auth or request body
+    // Per RFC 6749 Section 2.3.1, both methods are valid
+    const authHeader = req.headers["authorization"];
+    if (authHeader && authHeader.startsWith("Basic ")) {
+      // HTTP Basic Authentication
+      const base64Credentials = authHeader.substring(6);
+      const credentials = Buffer.from(base64Credentials, "base64").toString("utf-8");
+      const [id, secret] = credentials.split(":");
+      client_id = id;
+      client_secret = secret;
+    } else {
+      // Request body parameters
+      client_id = req.body.client_id;
+      client_secret = req.body.client_secret;
+    }
 
     // Validate grant type
     if (grant_type !== "client_credentials") {
